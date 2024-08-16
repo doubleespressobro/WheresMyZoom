@@ -50,6 +50,7 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
     IntPtr baseAddress = IntPtr.Zero;
     IntPtr baseAllocation = IntPtr.Zero;
     nint processHandle = 0;
+    SigScanSharp SigScan;
 
     IntPtr FindNextFreeMemoryRegion(IntPtr startAddress, uint size)
     {
@@ -119,6 +120,9 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
             processHandle = OpenProcess(0x1F0FFF, false, GameController.Memory.Process.Id);
 
             baseAllocation = AllocateMemory(baseAddress, 0x1000);
+
+            SigScan = new SigScanSharp(processHandle);
+            SigScan.SelectModule(GameController.Memory.Process.Modules[0]);
         }
     }
 
@@ -245,7 +249,7 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
         return false;
     }
 
-    private void ApplyZoomPatch(IntPtr baseAddress, int instructionOffset)
+    private void ApplyZoomPatch()
     {
         /* 
             .text:00000000000E67E1                 minss   xmm1, cs:Y
@@ -261,7 +265,14 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
         if (!WriteValueToMemory(zoomMemoryAllocation, 30.0f)) return;
 
         IntPtr zoomPatchAddress = IntPtr.Add(zoomMemoryAllocation, sizeof(float) + 2);
-        IntPtr patchAddress = IntPtr.Add(baseAddress, instructionOffset);
+
+        IntPtr patchAddress = (nint)SigScan.FindPattern("F3 0F 5D ? ? ? ? ? F3 0F 11 ? ? ? ? ? C6", out _);
+        if (patchAddress == IntPtr.Zero)
+        {
+            DebugWindow.LogError("Failed to find zoom patch address.");
+            return;
+        }
+
         long relativeAddress = zoomPatchAddress.ToInt64() - IntPtr.Add(patchAddress, 5).ToInt64();
 
         if (!WriteJumpToMemory(patchAddress, relativeAddress, 3, false)) return;
@@ -273,7 +284,7 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
     }
 
 
-    private void ApplyFogPatch(IntPtr baseAddress, int instructionOffset, int memoryOffset)
+    private void ApplyFogPatch1()
     {
         /*
             .text:0000000000D8BB2C                 mov     [rsi+180h], al
@@ -283,8 +294,27 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
             .text:0000000000D8BB48                 mov     [rsi+19Ch], eax
             .text:0000000000D8BB4E                 movss   xmm0, dword ptr [rbx+110h]
             .text:0000000000D8BB56                 movss   xmm1, dword ptr [rbx+118h] 
+        */
 
+        IntPtr fogMemoryAllocation = FindUnusedSection(baseAddress - 0x10000, 1000, 10);
+        if (fogMemoryAllocation == IntPtr.Zero) return;
 
+        IntPtr originalInstructionAddress = (nint)SigScan.FindPattern("88 86 ? ? 00 00 f2 0F 10 ? ? ? ? ? 8B", out _);
+        if (originalInstructionAddress == IntPtr.Zero)
+        {
+            DebugWindow.LogError("Failed to find signature.");
+            return;
+        }
+
+        long jumpToNewCodeRelative = WriteFogPatch(fogMemoryAllocation, originalInstructionAddress, 0x180);
+        if (jumpToNewCodeRelative == 0) return;
+
+        if (!WriteJumpToMemory(originalInstructionAddress, jumpToNewCodeRelative, 1, false)) return;
+    }
+
+    private void ApplyFogPatch2()
+    {
+        /*
             .text:0000000000D8BABA                 mov     [rsi+160h], cl
             .text:0000000000D8BAC0                 mov     eax, [rbx+378h]
             .text:0000000000D8BAC6                 movsd   xmm0, qword ptr [rbx+370h]
@@ -297,8 +327,14 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
         IntPtr fogMemoryAllocation = FindUnusedSection(baseAddress - 0x10000, 1000, 10);
         if (fogMemoryAllocation == IntPtr.Zero) return;
 
-        IntPtr originalInstructionAddress = IntPtr.Add(baseAddress, instructionOffset);
-        long jumpToNewCodeRelative = WriteFogPatch(fogMemoryAllocation, originalInstructionAddress, memoryOffset);
+        IntPtr originalInstructionAddress = (nint)SigScan.FindPattern("88 8E 60 01 00 00", out _);
+        if (originalInstructionAddress == IntPtr.Zero)
+        {
+            DebugWindow.LogError("Failed to find signature.");
+            return;
+        }
+
+        long jumpToNewCodeRelative = WriteFogPatch(fogMemoryAllocation, originalInstructionAddress, 0x160);
         if (jumpToNewCodeRelative == 0) return;
 
         if (!WriteJumpToMemory(originalInstructionAddress, jumpToNewCodeRelative, 1, false)) return;
@@ -389,7 +425,7 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
         return (patchMemoryAllocation.ToInt64() + 1) - (originalInstructionAddress.ToInt64());
     }
 
-    private void ApplyNoBlackBoxPatch(IntPtr baseAddress, int instructionOffset, float blackKillValue)
+    private void ApplyNoBlackBoxPatch(float blackKillValue)
     {
         /*
             .text:0000000000CBFCA5                 ucomiss xmm0, dword ptr [rcx+264h]
@@ -404,7 +440,12 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
         IntPtr patchMemoryAllocation = FindUnusedSection(baseAddress - 0x10000, 1000, 10);
         if (patchMemoryAllocation == IntPtr.Zero) return;
 
-        IntPtr originalInstructionAddress = IntPtr.Add(baseAddress, instructionOffset);
+        IntPtr originalInstructionAddress = (nint)SigScan.FindPattern("0F 2E 81 64 02 00 00", out _);
+        if (originalInstructionAddress == IntPtr.Zero)
+        {
+            DebugWindow.LogError("Failed to find signature.");
+            return;
+        }
 
         long jumpToNewCodeRelative = WriteNoBlackBoxPatch(patchMemoryAllocation, originalInstructionAddress, blackKillValue);
         if (jumpToNewCodeRelative == 0) return;
@@ -448,7 +489,7 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
     }
 
 
-    private void ApplyFastZoomPatch(IntPtr baseAddress, int instructionOffset)
+    private void ApplyFastZoomPatch()
     {
         /*
             .text:00000000000E67E9                 movss   dword ptr [rdi+450h], xmm1
@@ -464,7 +505,12 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
         IntPtr patchMemoryAllocation = FindUnusedSection(baseAddress - 0x10000, 1000, 10);
         if (patchMemoryAllocation == IntPtr.Zero) return;
 
-        IntPtr originalInstructionAddress = IntPtr.Add(baseAddress, instructionOffset);
+        IntPtr originalInstructionAddress = (nint)SigScan.FindPattern("F3 0F 11 8F 50 04 00 00", out _);
+        if (originalInstructionAddress == IntPtr.Zero)
+        {
+            DebugWindow.LogError("Failed to find signature.");
+            return;
+        }
 
         long jumpToNewCodeRelative = WriteFastZoomPatch(patchMemoryAllocation, originalInstructionAddress);
         if (jumpToNewCodeRelative == 0) return;
@@ -509,7 +555,7 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
         return (patchMemoryAllocation.ToInt64() + 5) - (originalInstructionAddress.ToInt64() + 5);
     }
 
-    private void ApplyIncrementalZoomPatch(IntPtr baseAddress, int instructionOffset)
+    private void ApplyIncrementalZoomPatch()
     {
         /*
             .text:00000000000E67CD                 mulss   xmm1, cs:dword_2DBAF00
@@ -522,7 +568,12 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
         IntPtr patchMemoryAllocation = FindUnusedSection(baseAddress - 0x10000, 1000, 10);
         if (patchMemoryAllocation == IntPtr.Zero) return;
 
-        IntPtr originalInstructionAddress = IntPtr.Add(baseAddress, instructionOffset);
+        IntPtr originalInstructionAddress = (nint)SigScan.FindPattern("F3 0F 59 0D ? ? ? ? F3 0F 58 8F ? ? ? ? F3 0F 5F", out _);
+        if (originalInstructionAddress == IntPtr.Zero)
+        {
+            DebugWindow.LogError("Failed to find signature.");
+            return;
+        }
 
         long jumpToNewCodeRelative = WriteIncrementalZoomPatch(patchMemoryAllocation, originalInstructionAddress, 0.5f);
         if (jumpToNewCodeRelative == 0) return;
@@ -560,7 +611,7 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
         return patchMemoryAllocation.ToInt64() - (originalInstructionAddress.ToInt64() + 5);
     }
 
-    private void ApplyNoSmoothPatch(IntPtr baseAddress, int instructionOffset)
+    private void ApplyNoSmoothPatch()
     {
         /*
             .text:00000000000DD330                 movss   dword ptr [rax], xmm0
@@ -574,7 +625,13 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
         IntPtr patchMemoryAllocation = FindUnusedSection(baseAddress - 0x10000, 1000, 10);
         if (patchMemoryAllocation == IntPtr.Zero) return;
 
-        IntPtr originalInstructionAddress = IntPtr.Add(baseAddress, instructionOffset);
+        IntPtr originalInstructionAddress = (nint)SigScan.FindPattern("F3 0F 11 00 80 BF ? ? 00 00 00", out _);
+        if (originalInstructionAddress == IntPtr.Zero)
+        {
+            DebugWindow.LogError("Failed to find signature.");
+            return;
+        }
+
 
         long jumpToNewCodeRelative = WriteNoSmoothPatch(patchMemoryAllocation, originalInstructionAddress);
         if (jumpToNewCodeRelative == 0) return;
@@ -624,7 +681,7 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
         return patchMemoryAllocation.ToInt64() - originalInstructionAddress.ToInt64();
     }
 
-    public void ApplyBrightnessPatch(IntPtr baseAddress, int instructionOffset, float value)
+    public void ApplyBrightnessPatch(float value)
     {
         /*
             .text:0000000000E45D1F                 mulss   xmm9, cs:dword_2DBC390
@@ -638,7 +695,12 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
         IntPtr patchMemoryAllocation = FindUnusedSection(baseAddress - 0x10000, 1000, 10);
         if (patchMemoryAllocation == IntPtr.Zero) return;
 
-        IntPtr originalInstructionAddress = IntPtr.Add(baseAddress, instructionOffset);
+        IntPtr originalInstructionAddress = (nint)SigScan.FindPattern("F3 44 0F 59 ? ? ? ? ? 48 8D ? ? 48 ? ? 48 ? 45", out _);
+        if (originalInstructionAddress == IntPtr.Zero)
+        {
+            DebugWindow.LogError("Failed to find signature.");
+            return;
+        }
 
         long jumpToNewCodeRelative = WriteBrightnessPatch(patchMemoryAllocation, originalInstructionAddress, value);
         if (jumpToNewCodeRelative == 0) return;
@@ -690,7 +752,7 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
 
     }
 
-    public void ApplyBrightnessHeight(IntPtr baseAddress, int instructionOffset)
+    public void ApplyBrightnessHeight()
     {
         /*
             .text:0000000000E45CE2                 movdqa  xmm0, cs:xmmword_2DBDBC0
@@ -704,7 +766,12 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
         IntPtr patchMemoryAllocation = FindUnusedSection(baseAddress - 0x10000, 1000, 10);
         if (patchMemoryAllocation == IntPtr.Zero) return;
 
-        IntPtr originalInstructionAddress = IntPtr.Add(baseAddress, instructionOffset);
+        IntPtr originalInstructionAddress = (nint)SigScan.FindPattern("66 0F 6F 05 ? ? ? ? F3 0F 10 CC", out _);
+        if (originalInstructionAddress == IntPtr.Zero)
+        {
+            DebugWindow.LogError("Failed to find signature.");
+            return;
+        }
 
         long jumpToNewCodeRelative = WriteBrightnessHeight(patchMemoryAllocation, originalInstructionAddress);
         if (jumpToNewCodeRelative == 0) return;
@@ -722,16 +789,16 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
         {
             InitializeProcess();
 
-            ApplyZoomPatch(baseAddress, 0xE67E1);
+            ApplyZoomPatch();
         };
 
         Settings.EnableFastZoom.OnPressed = () =>
         {
             InitializeProcess();
 
-            ApplyFastZoomPatch(baseAddress, 0xE67E9);
-            ApplyIncrementalZoomPatch(baseAddress, 0xE67CD);
-            ApplyNoSmoothPatch(baseAddress, 0xDD330);
+            ApplyFastZoomPatch();
+            ApplyIncrementalZoomPatch();
+            ApplyNoSmoothPatch();
         };
 
 
@@ -739,23 +806,23 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
         {
             InitializeProcess();
 
-            ApplyFogPatch(baseAddress, 0xD8BB2C, 0x180);
-            ApplyFogPatch(baseAddress, 0xD8BABA, 0x160);
+            ApplyFogPatch1();
+            ApplyFogPatch2();
         };
 
         Settings.EnableNoBlackBox.OnPressed = () =>
         {
             InitializeProcess();
 
-            ApplyNoBlackBoxPatch(baseAddress, 0xCBFCA5, 20000.0f);
+            ApplyNoBlackBoxPatch(20000.0f);
         };
 
         Settings.EnableBrightness.OnPressed = () =>
         {
             InitializeProcess();
 
-            ApplyBrightnessPatch(baseAddress, 0xE45D1F, 10000.0f);
-            ApplyBrightnessHeight(baseAddress, 0xE45CE2);
+            ApplyBrightnessPatch(10000.0f);
+            ApplyBrightnessHeight();
         };
     }
 }
