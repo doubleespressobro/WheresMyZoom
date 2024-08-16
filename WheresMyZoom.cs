@@ -1,6 +1,8 @@
 ﻿using ExileCore;
 using System.Runtime.InteropServices;
 using System;
+using System.Numerics;
+using System.Linq;
 
 namespace WheresMyZoom;
 
@@ -93,7 +95,7 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
                     zeroCount++;
                     if (zeroCount == count)
                     {
-                        return IntPtr.Add(address, i - count + 2);
+                        return IntPtr.Add(address, i - count + 1);
                     }
                 }
                 else
@@ -141,6 +143,24 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
             DebugWindow.LogError("Failed to write value. Error: " + Marshal.GetLastWin32Error());
             return false;
         }
+
+        return true;
+    }
+
+    private bool WriteVector4ToMemory(IntPtr address, Vector4 value)
+    {
+        byte[] valueBytes = BitConverter.GetBytes(value.X)
+            .Concat(BitConverter.GetBytes(value.Y))
+            .Concat(BitConverter.GetBytes(value.Z))
+            .Concat(BitConverter.GetBytes(value.W))
+            .ToArray();
+
+        if (!WriteProcessMemory(processHandle, address, valueBytes, (uint)valueBytes.Length, out _))
+        {
+            DebugWindow.LogError("Failed to write vector. Error: " + Marshal.GetLastWin32Error());
+            return false;
+        }
+
         return true;
     }
 
@@ -158,12 +178,20 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
         Span<byte> nopInstruction = stackalloc byte[nopSize];
         if (useCustomNOP)
         {
-            nopInstruction = stackalloc byte[4];
 
-            nopInstruction[0] = 0x0F;
-            nopInstruction[1] = 0x1F;
-            nopInstruction[2] = 0x40;
-            nopInstruction[3] = 0x00;
+            if (nopSize == 4)
+            {
+                nopInstruction[0] = 0x0F;
+                nopInstruction[1] = 0x1F;
+                nopInstruction[2] = 0x40;
+                nopInstruction[3] = 0x00;
+            }
+            else if(nopSize == 3)
+            {
+                nopInstruction[0] = 0x0F;
+                nopInstruction[1] = 0x1F;
+                nopInstruction[2] = 0x00;
+            }
         }
         else
         {
@@ -194,7 +222,7 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
         long relativeValueAddr = baseAddress.ToInt64() - IntPtr.Add(patchAddress, 8).ToInt64();
         long relativeJumpBackAddr = origAddress.ToInt64() + 3 - IntPtr.Add(patchAddress, 8).ToInt64();
 
-        Span<byte> newCode = stackalloc byte[13];
+        Span<byte> newCode = stackalloc byte[14];
         newCode[0] = 0xF3;
         newCode[1] = 0x0F;
         newCode[2] = 0x5D;
@@ -204,6 +232,8 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
 
         newCode[8] = 0xE9;
         BitConverter.TryWriteBytes(newCode.Slice(9, 4), (int)relativeJumpBackAddr);
+
+        newCode[13] = 0xC3;
 
         return WriteProcessMemory(processHandle, patchAddress, newCode.ToArray(), (uint)newCode.Length, out _)
             || LogWriteError();
@@ -215,26 +245,70 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
         return false;
     }
 
+    private void ApplyZoomPatch(IntPtr baseAddress, int instructionOffset)
+    {
+        /* 
+            .text:00000000000E67E1                 minss   xmm1, cs:Y
+            .text:00000000000E67E9                 movss   dword ptr [rdi+450h], xmm1
+            .text:00000000000E67F1
+            .text:00000000000E67F1 loc_E67F1:                              ; CODE XREF: sub_E6610+1B0↑j
+            .text:00000000000E67F1                 mov     byte ptr [rsi], 1
+        */
+
+        IntPtr zoomMemoryAllocation = FindUnusedSection(baseAddress - 0x10000, 1000, 10);
+        if (zoomMemoryAllocation == IntPtr.Zero) return;
+
+        if (!WriteValueToMemory(zoomMemoryAllocation, 30.0f)) return;
+
+        IntPtr zoomPatchAddress = IntPtr.Add(zoomMemoryAllocation, sizeof(float) + 2);
+        IntPtr patchAddress = IntPtr.Add(baseAddress, instructionOffset);
+        long relativeAddress = zoomPatchAddress.ToInt64() - IntPtr.Add(patchAddress, 5).ToInt64();
+
+        if (!WriteJumpToMemory(patchAddress, relativeAddress, 3, false)) return;
+
+        IntPtr afterMinssAddress = IntPtr.Add(zoomPatchAddress, 5 + 3);
+        long zoomH1RelativeAddress = zoomMemoryAllocation.ToInt64() - afterMinssAddress.ToInt64();
+
+        if (!WriteMinssInstruction(zoomMemoryAllocation, zoomPatchAddress, patchAddress)) return;
+    }
+
 
     private void ApplyFogPatch(IntPtr baseAddress, int instructionOffset, int memoryOffset)
     {
+        /*
+            .text:0000000000D8BB2C                 mov     [rsi+180h], al
+            .text:0000000000D8BB32                 movsd   xmm0, qword ptr [rbx+380h]
+            .text:0000000000D8BB3A                 mov     eax, [rbx+388h]
+            .text:0000000000D8BB40                 movsd   qword ptr [rsi+194h], xmm0
+            .text:0000000000D8BB48                 mov     [rsi+19Ch], eax
+            .text:0000000000D8BB4E                 movss   xmm0, dword ptr [rbx+110h]
+            .text:0000000000D8BB56                 movss   xmm1, dword ptr [rbx+118h] 
+
+
+            .text:0000000000D8BABA                 mov     [rsi+160h], cl
+            .text:0000000000D8BAC0                 mov     eax, [rbx+378h]
+            .text:0000000000D8BAC6                 movsd   xmm0, qword ptr [rbx+370h]
+            .text:0000000000D8BACE                 movsd   qword ptr [rsi+174h], xmm0
+            .text:0000000000D8BAD6                 mov     [rsi+17Ch], eax
+            .text:0000000000D8BADC                 movss   xmm0, dword ptr [rbx+0F0h]
+            .text:0000000000D8BAE4                 movss   xmm1, dword ptr [rbx+0F8h]
+        */
+
         IntPtr fogMemoryAllocation = FindUnusedSection(baseAddress - 0x10000, 1000, 10);
         if (fogMemoryAllocation == IntPtr.Zero) return;
 
         IntPtr originalInstructionAddress = IntPtr.Add(baseAddress, instructionOffset);
         long jumpToNewCodeRelative = WriteFogPatch(fogMemoryAllocation, originalInstructionAddress, memoryOffset);
-
         if (jumpToNewCodeRelative == 0) return;
 
-        IntPtr patchAddress = originalInstructionAddress;
-        if (!WriteJumpToMemory(patchAddress, jumpToNewCodeRelative, 1, false)) return;
+        if (!WriteJumpToMemory(originalInstructionAddress, jumpToNewCodeRelative, 1, false)) return;
     }
 
     private long WriteFogPatch(IntPtr fogMemoryAllocation, IntPtr originalInstructionAddress, int memoryOffset)
     {
         long relativeAddress = originalInstructionAddress.ToInt64() - IntPtr.Add(fogMemoryAllocation, 9).ToInt64();
 
-        Span<byte> newCode = stackalloc byte[15];
+        Span<byte> newCode = stackalloc byte[16];
 
         newCode[0] = 0xC7;
         newCode[1] = 0x86;
@@ -249,6 +323,8 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
 
         BitConverter.TryWriteBytes(newCode.Slice(11, 4), (int)relativeAddress);
 
+        newCode[15] = 0xC3;
+
         if (!WriteProcessMemory(processHandle, fogMemoryAllocation, newCode.ToArray(), (uint)newCode.Length, out _))
         {
             DebugWindow.LogError($"Failed to write fog patch at offset 0x{memoryOffset:X}. Error: {Marshal.GetLastWin32Error()}");
@@ -258,7 +334,7 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
         return fogMemoryAllocation.ToInt64() - (originalInstructionAddress.ToInt64() + 5);
     }
 
-    private long WriteBlackBoxPatch(IntPtr patchMemoryAllocation, IntPtr originalInstructionAddress, float value)
+    private long WriteNoBlackBoxPatch(IntPtr patchMemoryAllocation, IntPtr originalInstructionAddress, float value)
     {
         if (!WriteValueToMemory(patchMemoryAllocation, value)) return 0;
 
@@ -269,7 +345,7 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
 
         long relativeReturnAddress = originalInstructionAddress.ToInt64() - (IntPtr.Add(patchMemoryAllocation, 28).ToInt64()) - 4;
 
-        Span<byte> newCode = stackalloc byte[38];
+        Span<byte> newCode = stackalloc byte[37];
 
         newCode[0] = 0xF3;
         newCode[1] = 0x0F;
@@ -302,30 +378,343 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
 
         BitConverter.TryWriteBytes(newCode.Slice(32, 4), (int)relativeReturnAddress);
 
+        newCode[36] = 0xC3;
+
         if (!WriteProcessMemory(processHandle, IntPtr.Add(patchMemoryAllocation, 5), newCode.ToArray(), (uint)newCode.Length, out _))
         {
             DebugWindow.LogError($"Failed to write BlackBox patch. Error: {Marshal.GetLastWin32Error()}");
             return 0;
         }
 
-        return patchMemoryAllocation.ToInt64() - (originalInstructionAddress.ToInt64());
+        return (patchMemoryAllocation.ToInt64() + 1) - (originalInstructionAddress.ToInt64());
     }
 
-    private void ApplyBlackKillPatch(IntPtr baseAddress, int instructionOffset, float blackKillValue)
+    private void ApplyNoBlackBoxPatch(IntPtr baseAddress, int instructionOffset, float blackKillValue)
     {
+        /*
+            .text:0000000000CBFCA5                 ucomiss xmm0, dword ptr [rcx+264h]
+            .text:0000000000CBFCAC                 jnz     short loc_CBFCB7
+            .text:0000000000CBFCAE                 ucomiss xmm1, dword ptr [rcx+260h]
+            .text:0000000000CBFCB5                 jz      short locret_CBFCCC
+            .text:0000000000CBFCB7
+            .text:0000000000CBFCB7 loc_CBFCB7:                             ; CODE XREF: sub_CBFC90+1C↑j
+            .text:0000000000CBFCB7                 movss   dword ptr [rcx+260h], xmm1 
+        */
+
         IntPtr patchMemoryAllocation = FindUnusedSection(baseAddress - 0x10000, 1000, 10);
         if (patchMemoryAllocation == IntPtr.Zero) return;
 
         IntPtr originalInstructionAddress = IntPtr.Add(baseAddress, instructionOffset);
 
-        long jumpToNewCodeRelative = WriteBlackBoxPatch(patchMemoryAllocation, originalInstructionAddress, blackKillValue);
-
+        long jumpToNewCodeRelative = WriteNoBlackBoxPatch(patchMemoryAllocation, originalInstructionAddress, blackKillValue);
         if (jumpToNewCodeRelative == 0) return;
 
-        IntPtr patchAddress = originalInstructionAddress;
-        if (!WriteJumpToMemory(patchAddress, jumpToNewCodeRelative, 2, true)) return;
+        if (!WriteJumpToMemory(originalInstructionAddress, jumpToNewCodeRelative, 4, true)) return;
     }
 
+    private long WriteFastZoomPatch(IntPtr patchMemoryAllocation, IntPtr originalInstructionAddress)
+    {
+        long relativeReturnAddress = (originalInstructionAddress.ToInt64() + 8) - (patchMemoryAllocation.ToInt64() + 21);
+
+        Span<byte> newCode = stackalloc byte[22];
+
+        newCode[0] = 0xF3;
+        newCode[1] = 0x0F;
+        newCode[2] = 0x11;
+        newCode[3] = 0x8F;
+
+        BitConverter.TryWriteBytes(newCode.Slice(4, 4), 0x00000450);
+
+        newCode[8] = 0xF3;
+        newCode[9] = 0x0F;
+        newCode[10] = 0x11;
+        newCode[11] = 0x8F;
+
+        BitConverter.TryWriteBytes(newCode.Slice(12, 4), 0x00000448);
+
+        newCode[16] = 0xE9;
+
+        BitConverter.TryWriteBytes(newCode.Slice(17, 4), (int)relativeReturnAddress);
+
+        newCode[21] = 0xC3;
+
+        if (!WriteProcessMemory(processHandle, patchMemoryAllocation, newCode.ToArray(), (uint)newCode.Length, out _))
+        {
+            DebugWindow.LogError($"Failed to write Fast Zoom patch. Error: {Marshal.GetLastWin32Error()}");
+            return 0;
+        }
+
+        return patchMemoryAllocation.ToInt64() - (originalInstructionAddress.ToInt64() + 5);
+    }
+
+
+    private void ApplyFastZoomPatch(IntPtr baseAddress, int instructionOffset)
+    {
+        /*
+            .text:00000000000E67E9                 movss   dword ptr [rdi+450h], xmm1
+            .text:00000000000E67F1
+            .text:00000000000E67F1 loc_E67F1:                              ; CODE XREF: sub_E6610+1B0↑j
+            .text:00000000000E67F1                 mov     byte ptr [rsi], 1
+            .text:00000000000E67F4
+            .text:00000000000E67F4 loc_E67F4:                              ; CODE XREF: sub_E6610+192↑j
+            .text:00000000000E67F4                                         ; sub_E6610+196↑j ...
+            .text:00000000000E67F4                 mov     rbx, [rsp+78h+arg_0] 
+        */
+
+        IntPtr patchMemoryAllocation = FindUnusedSection(baseAddress - 0x10000, 1000, 10);
+        if (patchMemoryAllocation == IntPtr.Zero) return;
+
+        IntPtr originalInstructionAddress = IntPtr.Add(baseAddress, instructionOffset);
+
+        long jumpToNewCodeRelative = WriteFastZoomPatch(patchMemoryAllocation, originalInstructionAddress);
+        if (jumpToNewCodeRelative == 0) return;
+
+        if (!WriteJumpToMemory(originalInstructionAddress, jumpToNewCodeRelative, 3, true)) return;
+    }
+
+    private long WriteIncrementalZoomPatch(IntPtr patchMemoryAllocation, IntPtr originalInstructionAddress, float value)
+    {
+        if (!WriteValueToMemory(patchMemoryAllocation, 0.5f))
+        {
+            DebugWindow.LogError("Failed to write zoom value.");
+            return 0;
+        }
+
+        IntPtr valueAddress = patchMemoryAllocation;
+
+        int relativeValueAddress = (int)(valueAddress.ToInt64() - (IntPtr.Add(patchMemoryAllocation, 8).ToInt64()) - 0x5);
+        long relativeReturnAddress = (originalInstructionAddress.ToInt64() + 3) - (patchMemoryAllocation.ToInt64() + 13);
+
+        Span<byte> newCode = stackalloc byte[14];
+
+        newCode[0] = 0xF3;
+        newCode[1] = 0x0F;
+        newCode[2] = 0x59;
+        newCode[3] = 0x0D;
+
+        BitConverter.TryWriteBytes(newCode.Slice(4, 4), relativeValueAddress);
+
+        newCode[8] = 0xE9;
+
+        BitConverter.TryWriteBytes(newCode.Slice(9, 4), (int)relativeReturnAddress);
+
+        newCode[13] = 0xC3;
+
+        if (!WriteProcessMemory(processHandle, IntPtr.Add(patchMemoryAllocation, 5), newCode.ToArray(), (uint)newCode.Length, out _))
+        {
+            DebugWindow.LogError("Failed to write zoom patch.");
+            return 0;
+        }
+
+        return (patchMemoryAllocation.ToInt64() + 5) - (originalInstructionAddress.ToInt64() + 5);
+    }
+
+    private void ApplyIncrementalZoomPatch(IntPtr baseAddress, int instructionOffset)
+    {
+        /*
+            .text:00000000000E67CD                 mulss   xmm1, cs:dword_2DBAF00
+            .text:00000000000E67D5                 addss   xmm1, dword ptr [rdi+450h]
+            .text:00000000000E67DD                 maxss   xmm1, xmm0
+            .text:00000000000E67E1                 minss   xmm1, cs:Y
+            .text:00000000000E67E9                 movss   dword ptr [rdi+450h], xmm1
+        */
+
+        IntPtr patchMemoryAllocation = FindUnusedSection(baseAddress - 0x10000, 1000, 10);
+        if (patchMemoryAllocation == IntPtr.Zero) return;
+
+        IntPtr originalInstructionAddress = IntPtr.Add(baseAddress, instructionOffset);
+
+        long jumpToNewCodeRelative = WriteIncrementalZoomPatch(patchMemoryAllocation, originalInstructionAddress, 0.5f);
+        if (jumpToNewCodeRelative == 0) return;
+
+        if (!WriteJumpToMemory(originalInstructionAddress, jumpToNewCodeRelative, 3, true))
+        {
+            DebugWindow.LogError("Failed to write jump to memory.");
+            return;
+        }
+    }
+
+    private long WriteNoSmoothPatch(IntPtr patchMemoryAllocation, IntPtr originalInstructionAddress)
+    {
+        long relativeReturnAddress = originalInstructionAddress.ToInt64() - patchMemoryAllocation.ToInt64();
+
+        Span<byte> newCode = stackalloc byte[10];
+
+        newCode[0] = 0x0F;
+        newCode[1] = 0x1F;
+        newCode[2] = 0x40;
+        newCode[3] = 0x00;
+
+        newCode[4] = 0xE9;
+
+        BitConverter.TryWriteBytes(newCode.Slice(5, 4), (int)relativeReturnAddress);
+
+        newCode[9] = 0xC3;
+
+        if (!WriteProcessMemory(processHandle, patchMemoryAllocation, newCode.ToArray(), (uint)newCode.Length, out _))
+        {
+            DebugWindow.LogError("Failed to write NoSmooth patch.");
+            return 0;
+        }
+
+        return patchMemoryAllocation.ToInt64() - (originalInstructionAddress.ToInt64() + 5);
+    }
+
+    private void ApplyNoSmoothPatch(IntPtr baseAddress, int instructionOffset)
+    {
+        /*
+            .text:00000000000DD330                 movss   dword ptr [rax], xmm0
+            .text:00000000000DD334                 cmp     byte ptr [rdi+498h], 0
+            .text:00000000000DD33B                 jz      short loc_DD34D
+            .text:00000000000DD33D                 cmp     byte ptr [rdi+494h], 0
+            .text:00000000000DD344                 jnz     short loc_DD34D
+            .text:00000000000DD346                 mov     byte ptr [rdi+498h], 0
+       */
+
+        IntPtr patchMemoryAllocation = FindUnusedSection(baseAddress - 0x10000, 1000, 10);
+        if (patchMemoryAllocation == IntPtr.Zero) return;
+
+        IntPtr originalInstructionAddress = IntPtr.Add(baseAddress, instructionOffset);
+
+        long jumpToNewCodeRelative = WriteNoSmoothPatch(patchMemoryAllocation, originalInstructionAddress);
+        if (jumpToNewCodeRelative == 0) return;
+
+        if (!WriteJumpToMemory(originalInstructionAddress, jumpToNewCodeRelative, 4, true))
+        {
+            DebugWindow.LogError("Failed to write jump to memory.");
+            return;
+        }
+    }
+
+    public long WriteBrightnessPatch(IntPtr patchMemoryAllocation, IntPtr originalInstructionAddress, float value)
+    {
+        if (!WriteValueToMemory(patchMemoryAllocation, value))
+        {
+            DebugWindow.LogError("Failed to write brightness value.");
+            return 0;
+        }
+
+        IntPtr valueAddress = patchMemoryAllocation;
+
+        int relativeValueAddress = (int)(valueAddress.ToInt64() - IntPtr.Add(patchMemoryAllocation, 14).ToInt64());
+        long relativeReturnAddress = (originalInstructionAddress.ToInt64() + 5) - (patchMemoryAllocation.ToInt64() + 15);
+
+        Span<byte> newCode = stackalloc byte[15];
+
+        newCode[0] = 0xF3;
+        newCode[1] = 0x44;
+        newCode[2] = 0x0F;
+        newCode[3] = 0x59;
+        newCode[4] = 0x0D;
+
+        BitConverter.TryWriteBytes(newCode.Slice(5, 4), relativeValueAddress);
+
+        newCode[9] = 0xE9;
+
+        BitConverter.TryWriteBytes(newCode.Slice(10, 4), (int)relativeReturnAddress);
+
+        newCode[14] = 0xC3;
+
+        if (!WriteProcessMemory(processHandle, IntPtr.Add(patchMemoryAllocation, 5), newCode.ToArray(), (uint)newCode.Length, out _))
+        {
+            DebugWindow.LogError("Failed to write brightness patch.");
+            return 0;
+        }
+
+        return patchMemoryAllocation.ToInt64() - originalInstructionAddress.ToInt64();
+    }
+
+    public void ApplyBrightnessPatch(IntPtr baseAddress, int instructionOffset, float value)
+    {
+        /*
+            .text:0000000000E45D1F                 mulss   xmm9, cs:dword_2DBC390
+            .text:0000000000E45D28                 lea     rdx, [rbp+57h+var_90]
+            .text:0000000000E45D2C                 mov     rcx, rdi
+            .text:0000000000E45D2F                 mov     qword ptr [rbp+57h+var_A0], 0
+            .text:0000000000E45D37                 addss   xmm0, dword ptr [rbp+57h+var_B0]
+            .text:0000000000E45D3C                 mov     dword ptr [rbp+57h+var_A0+8], 3F800000h
+        */
+            
+        IntPtr patchMemoryAllocation = FindUnusedSection(baseAddress - 0x10000, 1000, 10);
+        if (patchMemoryAllocation == IntPtr.Zero) return;
+
+        IntPtr originalInstructionAddress = IntPtr.Add(baseAddress, instructionOffset);
+
+        long jumpToNewCodeRelative = WriteBrightnessPatch(patchMemoryAllocation, originalInstructionAddress, value);
+        if (jumpToNewCodeRelative == 0) return;
+
+        if (!WriteJumpToMemory(originalInstructionAddress, jumpToNewCodeRelative, 4, true))
+        {
+            DebugWindow.LogError("Failed to write jump to memory.");
+            return;
+        }
+    }
+
+    public long WriteBrightnessHeight(IntPtr patchMemoryAllocation, IntPtr originalInstructionAddress)
+    {
+        if (!WriteVector4ToMemory(patchMemoryAllocation, new Vector4(-22.5f, -83.5f, -1000.0f, 0.0f)))
+        {
+            DebugWindow.LogError("Failed to write brightness height value.");
+            return 0;
+        }
+
+        IntPtr valueAddress = patchMemoryAllocation;
+
+        IntPtr addressAfterInstruction = IntPtr.Add(patchMemoryAllocation, 16 + 7); 
+        int relativeValueAddress = (int)(valueAddress.ToInt64() - addressAfterInstruction.ToInt64());
+
+        Span<byte> newCode = stackalloc byte[13];
+
+        newCode[0] = 0x0F;
+        newCode[1] = 0x10;
+        newCode[2] = 0x05;
+
+        BitConverter.TryWriteBytes(newCode.Slice(3, 4), relativeValueAddress);
+
+        newCode[7] = 0xE9;
+
+        long relativeReturnAddress = (originalInstructionAddress.ToInt64() + 5 + 3) - (IntPtr.Add(patchMemoryAllocation, 16 + 12).ToInt64());
+
+        BitConverter.TryWriteBytes(newCode.Slice(8, 4), (int)relativeReturnAddress);
+
+        newCode[12] = 0xC3;
+
+        if (!WriteProcessMemory(processHandle, IntPtr.Add(patchMemoryAllocation, 16), newCode.ToArray(), (uint)newCode.Length, out _))
+        {
+            DebugWindow.LogError("Failed to write patch with movaps.");
+            return 0;
+        }
+
+        return (patchMemoryAllocation.ToInt64() + 6) - (originalInstructionAddress.ToInt64() - 5);
+
+
+    }
+
+    public void ApplyBrightnessHeight(IntPtr baseAddress, int instructionOffset)
+    {
+        /*
+            .text:0000000000E45CE2                 movdqa  xmm0, cs:xmmword_2DBDBC0
+            .text:0000000000E45CEA                 movss   xmm1, xmm4
+            .text:0000000000E45CEE                 shufps  xmm1, xmm1, 0E1h
+            .text:0000000000E45CF2                 movups  [rbp+57h+var_A0], xmm1
+            .text:0000000000E45CF6                 movaps  [rbp+57h+var_70], xmm1
+            .text:0000000000E45CFA                 movups  [rbp+57h+var_90], xmm0                                                                                               
+        */
+
+        IntPtr patchMemoryAllocation = FindUnusedSection(baseAddress - 0x10000, 1000, 10);
+        if (patchMemoryAllocation == IntPtr.Zero) return;
+
+        IntPtr originalInstructionAddress = IntPtr.Add(baseAddress, instructionOffset);
+
+        long jumpToNewCodeRelative = WriteBrightnessHeight(patchMemoryAllocation, originalInstructionAddress);
+        if (jumpToNewCodeRelative == 0) return;
+
+        if (!WriteJumpToMemory(originalInstructionAddress, jumpToNewCodeRelative, 3, true))
+        {
+            DebugWindow.LogError("Failed to write jump to memory.");
+            return;
+        }
+    }
 
     public override void OnLoad()
     {
@@ -333,22 +722,18 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
         {
             InitializeProcess();
 
-            IntPtr zoomMemoryAllocation = FindUnusedSection(baseAddress - 0x10000, 1000, 10);
-            if (zoomMemoryAllocation == IntPtr.Zero) return;
-
-            if (!WriteValueToMemory(zoomMemoryAllocation, 30.0f)) return;
-
-            IntPtr zoomPatchAddress = IntPtr.Add(zoomMemoryAllocation, sizeof(float) + 2);
-            IntPtr patchAddress = IntPtr.Add(baseAddress, 0xE67E1);
-            long relativeAddress = zoomPatchAddress.ToInt64() - IntPtr.Add(patchAddress, 5).ToInt64();
-
-            if (!WriteJumpToMemory(patchAddress, relativeAddress, 3, false)) return;
-
-            IntPtr afterMinssAddress = IntPtr.Add(zoomPatchAddress, 5 + 3);
-            long zoomH1RelativeAddress = zoomMemoryAllocation.ToInt64() - afterMinssAddress.ToInt64();
-
-            if (!WriteMinssInstruction(zoomMemoryAllocation, zoomPatchAddress, patchAddress)) return;
+            ApplyZoomPatch(baseAddress, 0xE67E1);
         };
+
+        Settings.EnableFastZoom.OnPressed = () =>
+        {
+            InitializeProcess();
+
+            ApplyFastZoomPatch(baseAddress, 0xE67E9);
+            ApplyIncrementalZoomPatch(baseAddress, 0xE67CD);
+            ApplyNoSmoothPatch(baseAddress, 0xDD330);
+        };
+
 
         Settings.EnableNoFog.OnPressed = () =>
         {
@@ -362,7 +747,15 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
         {
             InitializeProcess();
 
-            ApplyBlackKillPatch(baseAddress, 0xCBFCA5, 20000.0f);
+            ApplyNoBlackBoxPatch(baseAddress, 0xCBFCA5, 20000.0f);
+        };
+
+        Settings.EnableBrightness.OnPressed = () =>
+        {
+            InitializeProcess();
+
+            ApplyBrightnessPatch(baseAddress, 0xE45D1F, 10000.0f);
+            ApplyBrightnessHeight(baseAddress, 0xE45CE2);
         };
     }
 }
