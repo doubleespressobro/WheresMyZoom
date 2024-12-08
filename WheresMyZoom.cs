@@ -1,4 +1,4 @@
-﻿using ExileCore;
+﻿using ExileCore2;
 using System.Runtime.InteropServices;
 using System;
 using System.Numerics;
