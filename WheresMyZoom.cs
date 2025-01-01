@@ -662,7 +662,7 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
         newCode[1] = 0x44;
         newCode[2] = 0x0F;
         newCode[3] = 0x59;
-        newCode[4] = 0x0D;
+        newCode[4] = 0x3D;
 
         BitConverter.TryWriteBytes(newCode.Slice(5, 4), relativeValueAddress);
 
@@ -684,18 +684,18 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
     public void ApplyBrightnessPatch(float value)
     {
         /*
-            .text:0000000000E45D1F                 mulss   xmm9, cs:dword_2DBC390
-            .text:0000000000E45D28                 lea     rdx, [rbp+57h+var_90]
-            .text:0000000000E45D2C                 mov     rcx, rdi
-            .text:0000000000E45D2F                 mov     qword ptr [rbp+57h+var_A0], 0
-            .text:0000000000E45D37                 addss   xmm0, dword ptr [rbp+57h+var_B0]
-            .text:0000000000E45D3C                 mov     dword ptr [rbp+57h+var_A0+8], 3F800000h
+            .text:0000000000E4B999 F3 44 0F 59 3D 56 D5 CE 01                          mulss   xmm15, cs:dword_2B38EF8
+            .text:0000000000E4B9A2 F3 44 0F 58 D7                                      addss   xmm10, xmm7
+            .text:0000000000E4B9A7 48 8D 44 24 30                                      lea     rax, [rsp+140h+var_110]
+            .text:0000000000E4B9AC 48 8B CB                                            mov     rcx, rbx
+            .text:0000000000E4B9AF F3 0F 10 8B 7C 02 00 00                             movss   xmm1, dword ptr [rbx+27Ch]
+            .text:0000000000E4B9B7 F3 45 0F 58 D9                                      addss   xmm11, xmm9
         */
-            
+
         IntPtr patchMemoryAllocation = FindUnusedSection(baseAddress - 0x10000, 1000, 10);
         if (patchMemoryAllocation == IntPtr.Zero) return;
 
-        IntPtr originalInstructionAddress = (nint)SigScan.FindPattern("F3 44 0F 59 ? ? ? ? ? 48 8D ? ? 48 ? ? 48 ? 45", out _);
+        IntPtr originalInstructionAddress = (nint)SigScan.FindPattern("F3 44 0F 59 3D ? ? ? ? F3 44 0F 58 D7", out _);
         if (originalInstructionAddress == IntPtr.Zero)
         {
             DebugWindow.LogError("Failed to find signature.");
@@ -705,7 +705,7 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
         long jumpToNewCodeRelative = WriteBrightnessPatch(patchMemoryAllocation, originalInstructionAddress, value);
         if (jumpToNewCodeRelative == 0) return;
 
-        if (!WriteJumpToMemory(originalInstructionAddress, jumpToNewCodeRelative, 4, true))
+        if (!WriteJumpToMemory(originalInstructionAddress, jumpToNewCodeRelative, 4, false))
         {
             DebugWindow.LogError("Failed to write jump to memory.");
             return;
@@ -755,18 +755,16 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
     public void ApplyBrightnessHeight()
     {
         /*
-            .text:0000000000E45CE2                 movdqa  xmm0, cs:xmmword_2DBDBC0
-            .text:0000000000E45CEA                 movss   xmm1, xmm4
-            .text:0000000000E45CEE                 shufps  xmm1, xmm1, 0E1h
-            .text:0000000000E45CF2                 movups  [rbp+57h+var_A0], xmm1
-            .text:0000000000E45CF6                 movaps  [rbp+57h+var_70], xmm1
-            .text:0000000000E45CFA                 movups  [rbp+57h+var_90], xmm0                                                                                               
+            .text:0000000000E4B96B 66 0F 6F 05 CD EF CE 01                             movdqa  xmm0, cs:xmmword_2B3A940
+            .text:0000000000E4B973 4C 8D 44 24 50                                      lea     r8, [rsp+140h+var_F8+8]
+            .text:0000000000E4B978 48 8D 54 24 30                                      lea     rdx, [rsp+140h+var_110]
+            .text:0000000000E4B97D 48 8D 4C 24 60                                      lea     rcx, [rsp+140h+var_E0]                                                                                          
         */
 
         IntPtr patchMemoryAllocation = FindUnusedSection(baseAddress - 0x10000, 1000, 10);
         if (patchMemoryAllocation == IntPtr.Zero) return;
 
-        IntPtr originalInstructionAddress = (nint)SigScan.FindPattern("66 0F 6F 05 ? ? ? ? F3 0F 10 CC", out _);
+        IntPtr originalInstructionAddress = (nint)SigScan.FindPattern("66 0F 6F 05 ? ? ? ? 4C 8D 44 24 ? 48 8D 54 24 ? 48 8D 4C 24 ?", out _);
         if (originalInstructionAddress == IntPtr.Zero)
         {
             DebugWindow.LogError("Failed to find signature.");
@@ -792,30 +790,30 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
             ApplyZoomPatch();
         };
 
-        Settings.EnableFastZoom.OnPressed = () =>
-        {
-            InitializeProcess();
+        //Settings.EnableFastZoom.OnPressed = () =>
+        //{
+        //    InitializeProcess();
 
-            ApplyFastZoomPatch();
-            ApplyIncrementalZoomPatch();
-            ApplyNoSmoothPatch();
-        };
+        //    ApplyFastZoomPatch();
+        //    ApplyIncrementalZoomPatch();
+        //    ApplyNoSmoothPatch();
+        //};
 
 
-        Settings.EnableNoFog.OnPressed = () =>
-        {
-            InitializeProcess();
+        //Settings.EnableNoFog.OnPressed = () =>
+        //{
+        //    InitializeProcess();
 
-            ApplyFogPatch1();
-            ApplyFogPatch2();
-        };
+        //    ApplyFogPatch1();
+        //    ApplyFogPatch2();
+        //};
 
-        Settings.EnableNoBlackBox.OnPressed = () =>
-        {
-            InitializeProcess();
+        //Settings.EnableNoBlackBox.OnPressed = () =>
+        //{
+        //    InitializeProcess();
 
-            ApplyNoBlackBoxPatch(20000.0f);
-        };
+        //    ApplyNoBlackBoxPatch(20000.0f);
+        //};
 
         Settings.EnableBrightness.OnPressed = () =>
         {
