@@ -785,44 +785,63 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
 
     public override void OnLoad()
     {
-        Settings.EnableZoom.OnPressed = () =>
+        if (baseAddress == IntPtr.Zero)
         {
             InitializeProcess();
+        }
 
+        Settings.ZoomMenu.EnableZoom.OnPressed = () =>
+        {
             ApplyZoomPatch();
         };
-
-        Settings.EnableFastZoom.OnPressed = () =>
+        if (Settings.ZoomMenu.EnableZoomAtLaunch)
         {
-            InitializeProcess();
+            ApplyZoomPatch();
+        }
 
+        Settings.ZoomMenu.EnableFastZoom.OnPressed = () =>
+        {
             ApplyFastZoomPatch();
             ApplyIncrementalZoomPatch();
             ApplyNoSmoothPatch();
         };
-
-
-        Settings.EnableNoFog.OnPressed = () =>
+        if (Settings.ZoomMenu.EnableFastZoomAtLaunch)
         {
-            InitializeProcess();
+            ApplyIncrementalZoomPatch();
+            ApplyFastZoomPatch();
+        }
 
+        Settings.QOLMenu.EnableNoFog.OnPressed = () =>
+        {
             ApplyFogPatch1();
             ApplyFogPatch2();
         };
-
-        Settings.EnableNoBlackBox.OnPressed = () =>
+        if (Settings.QOLMenu.EnableNoFogAtLaunch)
         {
-            InitializeProcess();
+            ApplyFogPatch1();
+            ApplyFogPatch2();
+            ApplyNoBlackBoxPatch(50000.0f);
+        }
 
+        Settings.QOLMenu.EnableNoBlackBox.OnPressed = () =>
+        {
             ApplyNoBlackBoxPatch(20000.0f);
         };
 
-        Settings.EnableBrightness.OnPressed = () =>
+        if(Settings.QOLMenu.EnableNoBlackBoxAtLaunch)
         {
-            InitializeProcess();
+            ApplyNoBlackBoxPatch(20000.0f);
+        };
 
+        Settings.QOLMenu.EnableBrightness.OnPressed = () =>
+        {
             ApplyBrightnessPatch(10000.0f);
             ApplyBrightnessHeight();
         };
+        if (Settings.QOLMenu.EnableBrightnessAtLaunch)
+        {
+            ApplyBrightnessPatch(10000.0f);
+            ApplyBrightnessHeight();
+        }
     }
 }
