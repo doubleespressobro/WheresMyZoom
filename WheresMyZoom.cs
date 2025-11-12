@@ -315,7 +315,7 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
             return;
         }
 
-        long jumpToNewCodeRelative = WriteFogPatch(fogMemoryAllocation, originalInstructionAddress, 0x100);
+        long jumpToNewCodeRelative = WriteFogPatch(fogMemoryAllocation, originalInstructionAddress, 0xF8);
         if (jumpToNewCodeRelative == 0) return;
 
         if (!WriteJumpToMemory(originalInstructionAddress, jumpToNewCodeRelative, 1, false)) return;
@@ -346,14 +346,14 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
         IntPtr fogMemoryAllocation = FindUnusedSection(baseAddress - 0x10000, 1000, 10);
         if (fogMemoryAllocation == IntPtr.Zero) return;
 
-        IntPtr originalInstructionAddress = (nint)SigScan.FindPattern("88 8E E0 00 00 00", out _);
+        IntPtr originalInstructionAddress = (nint)SigScan.FindPattern("88 8E D8 00 00 00", out _);
         if (originalInstructionAddress == IntPtr.Zero)
         {
             DebugWindow.LogError("Failed to find signature.");
             return;
         }
 
-        long jumpToNewCodeRelative = WriteFogPatch(fogMemoryAllocation, originalInstructionAddress, 0xE0);
+        long jumpToNewCodeRelative = WriteFogPatch(fogMemoryAllocation, originalInstructionAddress, 0xD8);
         if (jumpToNewCodeRelative == 0) return;
 
         if (!WriteJumpToMemory(originalInstructionAddress, jumpToNewCodeRelative, 1, false)) return;
