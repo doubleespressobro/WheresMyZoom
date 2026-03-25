@@ -346,14 +346,14 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
         IntPtr fogMemoryAllocation = FindUnusedSection(baseAddress - 0x10000, 1000, 10);
         if (fogMemoryAllocation == IntPtr.Zero) return;
 
-        IntPtr originalInstructionAddress = (nint)SigScan.FindPattern("88 8E D8 00 00 00", out _);
+        IntPtr originalInstructionAddress = (nint)SigScan.FindPattern("88 8E F0 00 00 00 8B", out _);
         if (originalInstructionAddress == IntPtr.Zero)
         {
             DebugWindow.LogError("Failed to find signature.");
             return;
         }
 
-        long jumpToNewCodeRelative = WriteFogPatch(fogMemoryAllocation, originalInstructionAddress, 0xD8);
+        long jumpToNewCodeRelative = WriteFogPatch(fogMemoryAllocation, originalInstructionAddress, 0xF0);
         if (jumpToNewCodeRelative == 0) return;
 
         if (!WriteJumpToMemory(originalInstructionAddress, jumpToNewCodeRelative, 1, false)) return;
