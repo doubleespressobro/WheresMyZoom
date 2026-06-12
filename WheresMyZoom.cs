@@ -315,7 +315,7 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
             return;
         }
 
-        long jumpToNewCodeRelative = WriteFogPatch(fogMemoryAllocation, originalInstructionAddress, 0xF8);
+        long jumpToNewCodeRelative = WriteFogPatch(fogMemoryAllocation, originalInstructionAddress, 0x110);
         if (jumpToNewCodeRelative == 0) return;
 
         if (!WriteJumpToMemory(originalInstructionAddress, jumpToNewCodeRelative, 1, false)) return;
