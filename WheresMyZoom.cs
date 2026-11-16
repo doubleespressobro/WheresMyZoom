@@ -249,6 +249,33 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
         return false;
     }
 
+    // Reads the [reg+disp32] memory operand of the instruction a patch replaces, so the patch writes the
+    // same field the game does. Game updates move these fields and change the base register.
+    private bool TryReadMemoryOperand(IntPtr address, ReadOnlySpan<byte> opcode, out int baseRegister, out int displacement)
+    {
+        baseRegister = 0;
+        displacement = 0;
+
+        byte[] bytes = new byte[opcode.Length + 5];
+        if (!ReadProcessMemory(processHandle, address, bytes, (uint)bytes.Length, out int bytesRead) || bytesRead != bytes.Length)
+        {
+            DebugWindow.LogError("Failed to read instruction. Error: " + Marshal.GetLastWin32Error());
+            return false;
+        }
+
+        byte modRm = bytes[opcode.Length];
+        bool isRegPlusDisp32 = (modRm & 0xC0) == 0x80 && (modRm & 0x07) != 0x04;
+        if (!bytes.AsSpan(0, opcode.Length).SequenceEqual(opcode) || !isRegPlusDisp32)
+        {
+            DebugWindow.LogError($"Unexpected instruction at {address:X} (already patched?).");
+            return false;
+        }
+
+        baseRegister = modRm & 0x07;
+        displacement = BitConverter.ToInt32(bytes, opcode.Length + 1);
+        return true;
+    }
+
     private void ApplyZoomPatch()
     {
         /* 
@@ -287,35 +314,26 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
     private void ApplyFogPatch1()
     {
         /*
-            .text:0000000000E1202C 88 86 00 01 00 00                       mov     [rsi+100h], al
-            .text:0000000000E12032 F2 0F 10 83 80 03 00 00                 movsd   xmm0, qword ptr [rbx+380h]
-            .text:0000000000E1203A 8B 83 88 03 00 00                       mov     eax, [rbx+388h]
-            .text:0000000000E12040 F2 0F 11 86 14 01 00 00                 movsd   qword ptr [rsi+114h], xmm0
-            .text:0000000000E12048 89 86 1C 01 00 00                       mov     [rsi+11Ch], eax
-            .text:0000000000E1204E F3 0F 10 83 10 01 00 00                 movss   xmm0, dword ptr [rbx+110h]
-            .text:0000000000E12056 F3 0F 10 8B 18 01 00 00                 movss   xmm1, dword ptr [rbx+118h]
-
-            *(_BYTE *)(v9 + 0x100) = *(_BYTE *)(a2 + 0x3CA);
-            v14 = *(_DWORD *)(a2 + 0x388);
-            *(_QWORD *)(v9 + 0x114) = *(_QWORD *)(a2 + 0x380);
-            *(_DWORD *)(v9 + 0x11C) = v14;
-            v15 = _mm_shuffle_ps((__m128)*(unsigned int *)(a2 + 0x108), (__m128)*(unsigned int *)(a2 + 0x108), 0xE1);
-            v15.m128_f32[0] = *(float *)(a2 + 0x110);
-            v16 = _mm_shuffle_ps(v15, v15, 0xC6);
-            v16.m128_f32[0] = *(float *)(a2 + 0x118);
+            .text:00000000010289A7 88 87 30 01 00 00                       mov     byte ptr [rdi+130h], al
+            .text:00000000010289AD 41 8B 87 A0 03 00 00                    mov     eax, dword ptr [r15+3A0h]
+            .text:00000000010289B4 F2 41 0F 10 87 98 03 00 00              movsd   xmm0, qword ptr [r15+398h]
+            .text:00000000010289BD F2 0F 11 87 44 01 00 00                 movsd   qword ptr [rdi+144h], xmm0
+            .text:00000000010289C5 89 87 4C 01 00 00                       mov     dword ptr [rdi+14Ch], eax
         */
 
         IntPtr fogMemoryAllocation = FindUnusedSection(baseAddress - 0x10000, 1000, 10);
         if (fogMemoryAllocation == IntPtr.Zero) return;
 
-        IntPtr originalInstructionAddress = (nint)SigScan.FindPattern("88 86 ? ? 00 00 f2 0F 10 ? ? ? ? ? 8B", out _);
+        IntPtr originalInstructionAddress = (nint)SigScan.FindPattern("88 87 30 01 00 00 41 8B 87", out _);
         if (originalInstructionAddress == IntPtr.Zero)
         {
-            DebugWindow.LogError("Failed to find signature.");
+            DebugWindow.LogError("Failed to find fog signature 1.");
             return;
         }
 
-        long jumpToNewCodeRelative = WriteFogPatch(fogMemoryAllocation, originalInstructionAddress, 0x110);
+        if (!TryReadMemoryOperand(originalInstructionAddress, [0x88], out int baseRegister, out int memoryOffset)) return;
+
+        long jumpToNewCodeRelative = WriteFogPatch(fogMemoryAllocation, originalInstructionAddress, baseRegister, memoryOffset);
         if (jumpToNewCodeRelative == 0) return;
 
         if (!WriteJumpToMemory(originalInstructionAddress, jumpToNewCodeRelative, 1, false)) return;
@@ -324,49 +342,40 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
     private void ApplyFogPatch2()
     {
         /*
-            .text:0000000000E11FBA 88 8E E0 00 00 00                       mov     [rsi+0E0h], cl
-            .text:0000000000E11FC0 8B 83 78 03 00 00                       mov     eax, [rbx+378h]
-            .text:0000000000E11FC6 F2 0F 10 83 70 03 00 00                 movsd   xmm0, qword ptr [rbx+370h]
-            .text:0000000000E11FCE F2 0F 11 86 F4 00 00 00                 movsd   qword ptr [rsi+0F4h], xmm0
-            .text:0000000000E11FD6 89 86 FC 00 00 00                       mov     [rsi+0FCh], eax
-            .text:0000000000E11FDC F3 0F 10 83 F0 00 00 00                 movss   xmm0, dword ptr [rbx+0F0h]
-            .text:0000000000E11FE4 F3 0F 10 8B F8 00 00 00                 movss   xmm1, dword ptr [rbx+0F8h]
-
-            *(_BYTE *)(v9 + 0xE0) = *(_BYTE *)(a2 + 0x3C8);
-            v10 = *(_DWORD *)(a2 + 0x378);
-            *(_QWORD *)(v9 + 0xF4) = *(_QWORD *)(a2 + 0x370);
-            *(_DWORD *)(v9 + 0xFC) = v10;
-            v36.m128_i32[3] = 0;
-            v11 = v36;
-            v11.m128_f32[0] = *(float *)(a2 + 0xF0);
-            v12 = _mm_shuffle_ps(v11, v11, 0xE1);
-            v12.m128_f32[0] = *(float *)(a2 + 0xF8);
+            .text:0000000001028932 88 87 10 01 00 00                       mov     byte ptr [rdi+110h], al
+            .text:0000000001028938 41 8B 87 90 03 00 00                    mov     eax, dword ptr [r15+390h]
+            .text:000000000102893F F2 41 0F 10 87 88 03 00 00              movsd   xmm0, qword ptr [r15+388h]
+            .text:0000000001028948 F2 0F 11 87 24 01 00 00                 movsd   qword ptr [rdi+124h], xmm0
+            .text:0000000001028950 89 87 2C 01 00 00                       mov     dword ptr [rdi+12Ch], eax
         */
 
         IntPtr fogMemoryAllocation = FindUnusedSection(baseAddress - 0x10000, 1000, 10);
         if (fogMemoryAllocation == IntPtr.Zero) return;
 
-        IntPtr originalInstructionAddress = (nint)SigScan.FindPattern("88 8E F0 00 00 00 8B", out _);
+        IntPtr originalInstructionAddress = (nint)SigScan.FindPattern("88 87 10 01 00 00 41 8B 87", out _);
         if (originalInstructionAddress == IntPtr.Zero)
         {
-            DebugWindow.LogError("Failed to find signature.");
+            DebugWindow.LogError("Failed to find fog signature 2.");
             return;
         }
 
-        long jumpToNewCodeRelative = WriteFogPatch(fogMemoryAllocation, originalInstructionAddress, 0xF0);
+        if (!TryReadMemoryOperand(originalInstructionAddress, [0x88], out int baseRegister, out int memoryOffset)) return;
+
+        long jumpToNewCodeRelative = WriteFogPatch(fogMemoryAllocation, originalInstructionAddress, baseRegister, memoryOffset);
         if (jumpToNewCodeRelative == 0) return;
 
         if (!WriteJumpToMemory(originalInstructionAddress, jumpToNewCodeRelative, 1, false)) return;
     }
 
-    private long WriteFogPatch(IntPtr fogMemoryAllocation, IntPtr originalInstructionAddress, int memoryOffset)
+    private long WriteFogPatch(IntPtr fogMemoryAllocation, IntPtr originalInstructionAddress, int baseRegister, int memoryOffset)
     {
         long relativeAddress = originalInstructionAddress.ToInt64() - IntPtr.Add(fogMemoryAllocation, 9).ToInt64();
 
         Span<byte> newCode = stackalloc byte[16];
 
+        // mov dword ptr [reg+memoryOffset], 0
         newCode[0] = 0xC7;
-        newCode[1] = 0x86;
+        newCode[1] = (byte)(0x80 | baseRegister);
 
         BitConverter.TryWriteBytes(newCode.Slice(2, 4), memoryOffset);
 
@@ -389,7 +398,7 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
         return fogMemoryAllocation.ToInt64() - (originalInstructionAddress.ToInt64() + 5);
     }
 
-    private long WriteNoBlackBoxPatch(IntPtr patchMemoryAllocation, IntPtr originalInstructionAddress, float value)
+    private long WriteNoBlackBoxPatch(IntPtr patchMemoryAllocation, IntPtr originalInstructionAddress, float value, int baseRegister, int memoryOffset)
     {
         if (!WriteValueToMemory(patchMemoryAllocation, value)) return 0;
 
@@ -416,18 +425,20 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
 
         BitConverter.TryWriteBytes(newCode.Slice(12, 4), relativeBlackBoxAddress2);
 
+        // movss dword ptr [reg+memoryOffset], xmm2
         newCode[16] = 0xF3;
         newCode[17] = 0x0F;
         newCode[18] = 0x11;
-        newCode[19] = 0x91;
+        newCode[19] = (byte)(0x90 | baseRegister);
 
-        BitConverter.TryWriteBytes(newCode.Slice(20, 4), 0x00000264);
+        BitConverter.TryWriteBytes(newCode.Slice(20, 4), memoryOffset);
 
+        // ucomiss xmm0, dword ptr [reg+memoryOffset]
         newCode[24] = 0x0F;
         newCode[25] = 0x2E;
-        newCode[26] = 0x81;
+        newCode[26] = (byte)(0x80 | baseRegister);
 
-        BitConverter.TryWriteBytes(newCode.Slice(27, 4), 0x00000264);
+        BitConverter.TryWriteBytes(newCode.Slice(27, 4), memoryOffset);
 
         newCode[31] = 0xE9;
 
@@ -447,26 +458,29 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
     private void ApplyNoBlackBoxPatch(float blackKillValue)
     {
         /*
-            .text:0000000000CBFCA5                 ucomiss xmm0, dword ptr [rcx+264h]
-            .text:0000000000CBFCAC                 jnz     short loc_CBFCB7
-            .text:0000000000CBFCAE                 ucomiss xmm1, dword ptr [rcx+260h]
-            .text:0000000000CBFCB5                 jz      short locret_CBFCCC
-            .text:0000000000CBFCB7
-            .text:0000000000CBFCB7 loc_CBFCB7:                             ; CODE XREF: sub_CBFC90+1C↑j
-            .text:0000000000CBFCB7                 movss   dword ptr [rcx+260h], xmm1 
+            .text:0000000001031C95 0F 2E 81 54 02 00 00                    ucomiss xmm0, dword ptr [rcx+254h]
+            .text:0000000001031C9C 75 09                                   jnz     short loc_1031CA7
+            .text:0000000001031C9E 0F 2E 89 50 02 00 00                    ucomiss xmm1, dword ptr [rcx+250h]
+            .text:0000000001031CA5 74 15                                   jz      short locret_1031CBC
+            .text:0000000001031CA7
+            .text:0000000001031CA7                         loc_1031CA7:
+            .text:0000000001031CA7 F3 0F 11 89 50 02 00 00                 movss   dword ptr [rcx+250h], xmm1
+            .text:0000000001031CAF F3 0F 11 91 54 02 00 00                 movss   dword ptr [rcx+254h], xmm2
         */
 
         IntPtr patchMemoryAllocation = FindUnusedSection(baseAddress - 0x10000, 1000, 10);
         if (patchMemoryAllocation == IntPtr.Zero) return;
 
-        IntPtr originalInstructionAddress = (nint)SigScan.FindPattern("0F 2E 81 64 02 00 00", out _);
+        IntPtr originalInstructionAddress = (nint)SigScan.FindPattern("0F 2E 81 54 02 00 00", out _);
         if (originalInstructionAddress == IntPtr.Zero)
         {
-            DebugWindow.LogError("Failed to find signature.");
+            DebugWindow.LogError("Failed to find no black box signature.");
             return;
         }
 
-        long jumpToNewCodeRelative = WriteNoBlackBoxPatch(patchMemoryAllocation, originalInstructionAddress, blackKillValue);
+        if (!TryReadMemoryOperand(originalInstructionAddress, [0x0F, 0x2E], out int baseRegister, out int memoryOffset)) return;
+
+        long jumpToNewCodeRelative = WriteNoBlackBoxPatch(patchMemoryAllocation, originalInstructionAddress, blackKillValue, baseRegister, memoryOffset);
         if (jumpToNewCodeRelative == 0) return;
 
         if (!WriteJumpToMemory(originalInstructionAddress, jumpToNewCodeRelative, 4, true)) return;
@@ -478,19 +492,21 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
 
         Span<byte> newCode = stackalloc byte[22];
 
+        // movss dword ptr [rdi+498h], xmm1 (target zoom)
         newCode[0] = 0xF3;
         newCode[1] = 0x0F;
         newCode[2] = 0x11;
         newCode[3] = 0x8F;
 
-        BitConverter.TryWriteBytes(newCode.Slice(4, 4), 0x000004B0);
+        BitConverter.TryWriteBytes(newCode.Slice(4, 4), 0x00000498);
 
+        // movss dword ptr [rdi+490h], xmm1 (current zoom, so it doesn't ease towards the target)
         newCode[8] = 0xF3;
         newCode[9] = 0x0F;
         newCode[10] = 0x11;
         newCode[11] = 0x8F;
 
-        BitConverter.TryWriteBytes(newCode.Slice(12, 4), 0x000004A8);
+        BitConverter.TryWriteBytes(newCode.Slice(12, 4), 0x00000490);
 
         newCode[16] = 0xE9;
 
@@ -511,30 +527,20 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
     private void ApplyFastZoomPatch()
     {
         /*
-            .text:00000000000F4069 F3 0F 11 8F B0 04 00 00                 movss   dword ptr [rdi+4B0h], xmm1
-            .text:00000000000F4071
-            .text:00000000000F4071                         loc_F4071:                              ; CODE XREF: sub_F3E90+1B0↑j
-            .text:00000000000F4071 C6 06 01                                mov     byte ptr [rsi], 1
-            .text:00000000000F4074
-            .text:00000000000F4074                         loc_F4074:                              ; CODE XREF: sub_F3E90+192↑j
-            .text:00000000000F4074                                                                 ; sub_F3E90+196↑j ...
-            .text:00000000000F4074 48 8B 9C 24 80 00 00 00                 mov     rbx, [rsp+78h+arg_0]
+            .text:000000000011B1C2 F3 0F 5D 0D ? ? ? ?                     minss   xmm1, cs:Y
+            .text:000000000011B1CA F3 0F 11 8F 98 04 00 00                 movss   dword ptr [rdi+498h], xmm1
+            .text:000000000011B1D2 C6 06 01                                mov     byte ptr [rsi], 1
 
-            *(float *)(v4 + 0x4B0) = fminf(
-                                           fmaxf(
-                                             (float)((float)*(int *)(a3 + 0x18) * *(float *)&dword_7FF7B81B0FE8)
-                                           + *(float *)(v4 + 0x4B0),
-                                             0.0),
-                                           *(float *)&dword_7FF7B81B1318);
+            Current (smoothed) zoom is [rdi+490h]: see "lea rsi, [rdi+490h]" just before the NoSmooth signature.
         */
 
         IntPtr patchMemoryAllocation = FindUnusedSection(baseAddress - 0x10000, 1000, 10);
         if (patchMemoryAllocation == IntPtr.Zero) return;
 
-        IntPtr originalInstructionAddress = (nint)SigScan.FindPattern("F3 0F 11 8F B0 04 00 00", out _);
+        IntPtr originalInstructionAddress = (nint)SigScan.FindPattern("F3 0F 11 8F 98 04 00 00", out _);
         if (originalInstructionAddress == IntPtr.Zero)
         {
-            DebugWindow.LogError("Failed to find signature.");
+            DebugWindow.LogError("Failed to find fast zoom signature.");
             return;
         }
 
@@ -597,7 +603,7 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
         IntPtr originalInstructionAddress = (nint)SigScan.FindPattern("F3 0F 59 0D ? ? ? ? F3 0F 58 8F ? ? ? ? F3 0F 5F", out _);
         if (originalInstructionAddress == IntPtr.Zero)
         {
-            DebugWindow.LogError("Failed to find signature.");
+            DebugWindow.LogError("Failed to find incremental zoom signature.");
             return;
         }
 
@@ -654,7 +660,7 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
         IntPtr originalInstructionAddress = (nint)SigScan.FindPattern("F3 0F 11 00 80 BF ? ? 00 00 00", out _);
         if (originalInstructionAddress == IntPtr.Zero)
         {
-            DebugWindow.LogError("Failed to find signature.");
+            DebugWindow.LogError("Failed to find no smooth signature.");
             return;
         }
 
@@ -724,7 +730,7 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
         IntPtr originalInstructionAddress = (nint)SigScan.FindPattern("F3 44 0F 59 ? ? ? ? ? 48 8D ? ? 48 ? ? 48 ? 45", out _);
         if (originalInstructionAddress == IntPtr.Zero)
         {
-            DebugWindow.LogError("Failed to find signature.");
+            DebugWindow.LogError("Failed to find brightness signature.");
             return;
         }
 
@@ -795,7 +801,7 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
         IntPtr originalInstructionAddress = (nint)SigScan.FindPattern("66 0F 6F 05 ? ? ? ? F3 0F 10 CC", out _);
         if (originalInstructionAddress == IntPtr.Zero)
         {
-            DebugWindow.LogError("Failed to find signature.");
+            DebugWindow.LogError("Failed to find brightness height signature.");
             return;
         }
 
