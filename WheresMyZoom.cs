@@ -471,7 +471,7 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
         IntPtr patchMemoryAllocation = FindUnusedSection(baseAddress - 0x10000, 1000, 10);
         if (patchMemoryAllocation == IntPtr.Zero) return;
 
-        IntPtr originalInstructionAddress = (nint)SigScan.FindPattern("0F 2E 81 54 02 00 00", out _);
+        IntPtr originalInstructionAddress = (nint)SigScan.FindPattern("0F 2E 81 54 02 00 00 75 09 0F 2E 89 50 02 00 00", out _);
         if (originalInstructionAddress == IntPtr.Zero)
         {
             DebugWindow.LogError("Failed to find no black box signature.");
@@ -852,7 +852,10 @@ public class WheresMyZoom : BaseSettingsPlugin<WheresMyZoomSettings>
         {
             ApplyFogPatch1();
             ApplyFogPatch2();
-            ApplyNoBlackBoxPatch(50000.0f);
+            if (!Settings.QOLMenu.EnableNoBlackBoxAtLaunch)
+            {
+                ApplyNoBlackBoxPatch(50000.0f);
+            }
         }
 
         Settings.QOLMenu.EnableNoBlackBox.OnPressed = () =>
